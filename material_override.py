@@ -42,6 +42,8 @@ stage.SetMetadata("metersPerUnit", meters_per_unit)
 
 root = stage.DefinePrim('/root', "Xform")
 
+stage.SetDefaultPrim(root)
+
 root.GetReferences().AddReference(usd_filename)
 
 scope = stage.DefinePrim('/root/MaterialX', "Scope")
