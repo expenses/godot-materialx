@@ -6,21 +6,11 @@ import sys
 usd_filename = sys.argv[1]
 materialx_filename = sys.argv[2]
 
-# Open the source stage
+# Open the source stage and extract metadata
 
 source_stage = Usd.Stage.Open(usd_filename)
-
-# Extract metadata
-
 up_axis = source_stage.GetMetadata("upAxis")
 meters_per_unit = source_stage.GetMetadata("metersPerUnit")
-
-# Extract the mesh path
-
-meshes = [x for x in source_stage.Traverse() if UsdGeom.Mesh(x)]
-assert len(meshes) == 1
-mesh = meshes[0]
-prim_to_override = mesh.GetPath()
 
 # extract the name of the materialx material.
 
@@ -50,8 +40,11 @@ scope = stage.DefinePrim('/root/MaterialX', "Scope")
 
 scope.GetReferences().AddReference(materialx_filename, "/MaterialX")
 
-over = stage.OverridePrim(prim_to_override)
+mesh_paths = (x.GetPath() for x in stage.Traverse() if UsdGeom.Mesh(x))
 
-over.GetRelationship("material:binding").SetTargets(["/root/MaterialX/Materials/" + material_name])
+for path in mesh_paths:
+    over = stage.OverridePrim(path)
+
+    over.GetRelationship("material:binding").SetTargets(["/root/MaterialX/Materials/" + material_name])
 
 stage.GetRootLayer().Save()
