@@ -1,11 +1,10 @@
 # coding: utf-8
-from pxr import Usd, UsdGeom, UsdShade, Sdf, Gf
+from pxr import Usd, UsdGeom, Sdf, Gf
 import sys
 import bpy
-import math
 
 def sanitise(name):
-    replacements = {" ": "_", ".": "_", "[": "", "]": ""}
+    replacements = {" ": "__", ".": "_", "[": "", "]": ""}
 
     for a, b in replacements.items():
         name = name.replace(a, b)
@@ -25,11 +24,9 @@ root_prim = stage.DefinePrim(root)
 stage.SetDefaultPrim(root_prim)
 stage.SetMetadata("upAxis", "Z")
 
-root_collections = list(bpy.context.scene.collection.children)
-#assert len(root_collections) == 1
-root_collection = root_collections[0]
+root_collection = bpy.context.scene.collection.children["Collection"]
 
-traversed_instance_collections = set()
+traversed_objects = set()
 
 stack = []
 for object in root_collection.objects:
@@ -40,51 +37,59 @@ for child_collection in root_collection.children:
 
 UsdGeom.Imageable(stage.DefinePrim(prototypes_path, "Xform")).CreateVisibilityAttr("invisible")
 
-
 while len(stack) > 0:
     (object, parent_path) = stack.pop()
 
+    # Avoid traversing the same object multiple times (you can't set the same xform more than once)
+    if object in traversed_objects:
+        continue
+
+    traversed_objects.add(object)
+
+    # Collections just create an Xform and add everything then contain.
     if type(object) is bpy.types.Collection:
         path = parent_path.AppendPath(sanitise(object.name))
         prim = stage.DefinePrim(path, "Xform")
 
-        for object in object.objects:
-            stack.append((object, path))
-            pass
+        for child in object.objects:
+            stack.append((child, path))
 
-        for child_collection in object.children:
-            stack.append((child_collection, path))
+
+        for child in object.children:
+            stack.append((child, path))
 
         continue
 
-    if (object.type == "CAMERA" or object.type == "LIGHT") and len(object.children) == 0:
+    # We don't just cameras/lights currently
+    if (object.type == "CAMERA" or object.type == "LIGHT"):
         continue
 
     path = parent_path.AppendPath(sanitise(object.name))
     prim = stage.DefinePrim(path, "Xform")
 
-    UsdGeom.Xformable(prim).AddXformOp(UsdGeom.XformOp.TypeTransform).Set(Gf.Matrix4d(list(object.matrix_local.transposed())))
-
-    if object.type == "MESH":
+    if object.type != "MESH":
+        # Transforms on meshes are generally bad as we're referencing in the whole model and transform stack anyway.
+        pos, rot, scale = object.matrix_local.decompose()
+        UsdGeom.Xformable(prim).AddXformOp(UsdGeom.XformOp.TypeTranslate).Set(Gf.Vec3d(list(pos)))
+        UsdGeom.Xformable(prim).AddXformOp(UsdGeom.XformOp.TypeOrient).Set(Gf.Quatd(*list(rot)))
+        UsdGeom.Xformable(prim).AddXformOp(UsdGeom.XformOp.TypeScale).Set(Gf.Vec3d(list(scale)))
+    else:
+        # Add a reference to the mesh object in the meshes file (name_full also gives the source filename)
         prim.SetInstanceable(True)
         prim.GetReferences().AddReference("meshes.usda", "/" + sanitise(object.data.name_full))
 
+    # Instance collections have just one child, which is the collection being instanced.
     if object.instance_collection is not None:
         path = prototypes_path.AppendPath(sanitise(object.instance_collection.name))
 
-        # We only need to do this check for traversed instances because `AddXformOp`
-        # can't be called with the same transform on the same prim twice.
-        # Avoiding traversing instances multiple times is nice for perf too.
-        if object.instance_collection not in traversed_instance_collections:
-            traversed_instance_collections.add(object.instance_collection)
-            # This is just here to avoid warnings.
-            stage.DefinePrim(path, "Xform")
-            stack.append((object.instance_collection, prototypes_path))
+        # This is just here to avoid warnings.
+        stage.DefinePrim(path, "Xform")
+        stack.append((object.instance_collection, prototypes_path))
 
         prim.SetInstanceable(True)
         prim.GetReferences().AddInternalReference(path)
 
-    for object in object.children:
-        stack.append((object, path))
+    for child in object.children:
+        stack.append((child, path))
 
 stage.GetRootLayer().Save()
