@@ -4,8 +4,19 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 import os
 import mathutils
 import math
+import sys
 
-from utils import get_gltf_reference_path_for_prim
+def get_gltf_reference_path_for_prim(prim):
+    stack = prim.GetPrimStack()
+    reference = None
+    # Iter through the prim stack from bottom-up, getting the latest appied
+    # reference.
+    for spec in reversed(stack):
+        references = spec.referenceList.GetAppliedItems()
+        if len(references) > 0:
+            reference = references[0]
+    return reference.assetPath
+
 
 def load(filename):
     stage = Usd.Stage.Open(filename)
@@ -26,7 +37,19 @@ def load(filename):
     for prim in stage.Traverse():
         bpy.context.scene["usd_paths"][str(prim.GetPath())] = None
         
-        object = bpy.data.objects.new(str(prim.GetName()), None)
+        data = None
+        
+        point_instancer = UsdGeom.PointInstancer(prim)
+        if point_instancer:
+            """
+            data = bpy.data.pointclouds.new(prim.GetName())
+            positions = data.attributes.new("position", "FLOAT_VECTOR", "POINT")
+            for i in range(100):
+            #data.attributes.add(positions)
+                data.points.link(bpy.types.Point())
+            """
+        
+        object = bpy.data.objects.new(str(prim.GetName()), data)
         bpy.context.scene.collection.objects.link(object)
         
         object.matrix_basis = list(cache.GetLocalTransformation(prim)[0])
@@ -36,7 +59,7 @@ def load(filename):
         if prim.GetParent() and prim.GetParent() in prim_to_object:
             object.parent = prim_to_object[prim.GetParent()]
             
-        if UsdGeom.Imageable(prim).GetVisibilityAttr().Get() == "invisible":
+        if UsdGeom.Imageable(prim).ComputeVisibility() == "invisible":
             object.hide_set(True)
         
         direct_arcs = Usd.PrimCompositionQuery.GetDirectReferences(prim).GetCompositionArcs()

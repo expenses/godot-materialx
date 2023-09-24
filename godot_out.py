@@ -1,6 +1,6 @@
 import sys
 import godot_parser
-from pxr import Usd, UsdGeom, Gf
+from pxr import Usd, UsdGeom, Gf, Sdf
 import json
 from utils import get_gltf_reference_path_for_prim
 
@@ -42,9 +42,6 @@ for node in file.find_all():
     else:
         transform = Gf.Matrix4d()
 
-    # Todo: we could do proper change detection, but at the moment
-    # it's just easier to write everything out.
-    #if node.get("metadata/usd_path") is None:
     path = node.name
     current_node = node
     while True:
@@ -58,14 +55,21 @@ for node in file.find_all():
             current_node = file.find_node(name=node.parent)
             # Todo: the godot node tree doesn't perfectly map to usd
             # as usd doesn't let you add children to an instanceable prim.
-            # If a node does this we just parent it to the next non-instanceable
-            # Ancestor, but this will probably break transforms.
-            if not current_node.instance:
-                path = current_node.name + "/" + path
+            if current_node.instance:
+                assert False
+            path = current_node.name + "/" + path
             continue
 
     if path in unused_paths:
         unused_paths.remove(path)
+
+    # We're currently outputting point instancer points as individual instances
+    # as this lets godot perform frustum culling and is generally faster.
+    # We don't want thse instances to get put back into the stage so we just ignore any
+    # children of point instancers. Point instancers shouldn't have children anyway so this
+    # works out fine.
+    if UsdGeom.PointInstancer(stage.GetPrimAtPath(Sdf.Path(path).GetParentPath())):
+        continue
 
     prim = stage.GetPrimAtPath(path) or stage.DefinePrim(path, "Xform")
     
@@ -75,8 +79,10 @@ for node in file.find_all():
         resource_path = file.find_ext_resource(id=node.instance).path
         instance_asset = resource_path.split("res://")[-1]
         if not prim.HasAuthoredReferences() or get_gltf_reference_path_for_prim(prim) != instance_asset:
-            prim.SetInstanceable(True)
-            prim.GetReferences().AddReference(instance_asset)
+            # Not sure how to handle instancing subscenes yet.
+            if not instance_asset.endswith(".tscn"):
+                prim.SetInstanceable(True)
+                prim.GetReferences().AddReference(instance_asset)
 
     if transform != base_transform:
         prim = UsdGeom.Xformable(prim)

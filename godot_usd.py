@@ -37,40 +37,49 @@ with scene.use_tree() as tree:
         node_type = "Node3D"
         instance = None
         data = {}
-        
+        children = []
+
         point_instancer = UsdGeom.PointInstancer(prim)
 
         if point_instancer:
-            node_type = "MultiMeshInstance3D"
+            node_type = "Node3D"
             positions = point_instancer.GetPositionsAttr().Get()
             orientations = point_instancer.GetOrientationsAttr().Get()
             scales = point_instancer.GetScalesAttr().Get()
 
             matrices = [Gf.Matrix4d().SetScale(Gf.Vec3d(scales[i])) * Gf.Matrix4d(Gf.Rotation(orientations[i]), Gf.Vec3d(positions[i])) for i in range(len(positions))]
-            values = [value for matrix in matrices for value in flatten_transposed_matrix(matrix)]
+            #values = [value for matrix in matrices for value in flatten_transposed_matrix(matrix)]
 
             # Need to handle prototypes as relationships to referenced prims
-            #prototypes = point_instancer.GetPrototypesRel()
-            #target = prototypes.GetTargets()[0]
-            #proto_prim = stage.GetPrimAtPath(target)
-            #asset = get_gltf_reference_path_for_prim(proto_prim)
+            prototypes = point_instancer.GetPrototypesRel()
+            target = prototypes.GetTargets()[0]
+            proto_prim = stage.GetPrimAtPath(target)
+            asset = get_gltf_reference_path_for_prim(proto_prim)
             # This isn't used in godot as it instances models in it's own mesh format extracted from gltfs.
             #data["metadata/instanced_mesh"] = godot_parser.ExtResource(add_ext(str(asset)))
 
-            sub_res = scene.add_sub_resource("MultiMesh")
-            sub_res["transform_format"] = 1
-            sub_res["instance_count"] = len(positions)
-            sub_res["buffer"] = godot_parser.GDObject("PackedFloat32Array", *values)
+            #sub_res = scene.add_sub_resource("MultiMesh")
+            #sub_res["transform_format"] = 1
+            #sub_res["instance_count"] = len(positions)
+            #sub_res["buffer"] = godot_parser.GDObject("PackedFloat32Array", *values)
 
-            mesh = prim.GetAttribute("godot_mesh").Get()
-            sub_res["mesh"] = godot_parser.ExtResource(add_ext(mesh, type = "ArrayMesh"))
-            data["multimesh"] = godot_parser.SubResource(sub_res.id)
+            #mesh = prim.GetAttribute("godot_mesh").Get()
+            asset_res = add_ext(asset)#add_ext(mesh, type = "ArrayMesh")
+            #mesh = godot_parser.ExtResource(mesh)
+            #sub_res["mesh"] = godot_parser.ExtResource(add_ext(mesh, type = "ArrayMesh"))
+            #data["multimesh"] = godot_parser.SubResource(sub_res.id)
 
-        direct_arcs = Usd.PrimCompositionQuery.GetDirectReferences(
-            prim
-        ).GetCompositionArcs()
+            for i, matrix in enumerate(matrices):
+                node = godot_parser.Node(f"{prim.GetName()}_{i}", instance=asset_res, type="Node3D")
+                node["transform"] = godot_parser.objects.GDObject("Transform3D", *flatten_matrix(matrix))
+                children.append(node)
 
-        if len(direct_arcs) == 0 and prim.HasAuthoredReferences():
+
+        if prim.HasAuthoredReferences():
+            direct_arcs = Usd.PrimCompositionQuery.GetDirectReferences(
+                prim
+            ).GetCompositionArcs()
+
             gltf = get_gltf_reference_path_for_prim(prim)
             instance = add_ext(gltf)
             node_type = None
@@ -79,9 +88,12 @@ with scene.use_tree() as tree:
         data["transform"] = godot_parser.objects.GDObject("Transform3D", *flatten_matrix(matrix))
 
         node = godot_parser.Node(prim.GetName(), instance=instance, type=node_type)
-        
+
         for key, value in data.items():
             node[key] = value
+
+        for child in children:
+            node.add_child(child)
 
         if prim.GetParent() == stage.GetPseudoRoot():
             tree.root = node
