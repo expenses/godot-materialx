@@ -12,9 +12,12 @@ next_internal_id = 2
 internal_id_to_sub_resource = {}
 connections = []
 
-def add_sub_resource(**kwargs):
+def add_sub_resource(type, **kwargs):
+    if type.startswith("VisualShaderNode"):
+        assert False, ("we're shortening names for brevity.", type)
+
     global next_internal_id
-    sub_res = scene.add_sub_resource(**kwargs)
+    sub_res = scene.add_sub_resource(type="VisualShaderNode"+type, **kwargs)
     internal_id = next_internal_id
     internal_id_to_sub_resource[internal_id] = godot_parser.SubResource(sub_res.id)
     next_internal_id += 1
@@ -87,13 +90,34 @@ two_input_mapping = {
     "in2": 1
 }
 
+def assert_node_has_no_value_sockets(node):
+    for input in node.getInputs():
+        assert input.getValue() == None, (str(node), [str(i) for i in node.getInputs()])
+
+# Todo: this do any kind of mapping between MaterialX input layouts and godot input layouts yet.
+def default_input_values(node):
+    values = []
+
+    for (i, input) in enumerate(node.getInputs()):
+        value = None
+        if input.getType() == "float":
+            value = input.getValue() or 0.0
+        elif input.getType() == "vector3":
+            value = input.getValue() and godot_parser.Vector3(*input.getValue()) or godot_parser.Vector3(0,0,0)
+        else:
+            assert False, input.getType()
+
+        values += [i, value]
+    return values
+
 # Add the node as a subresource and return it's internal id.
 # Todo: make sure we can use this to insert extra nodes such as for converting normals to world space.
 def add_node(node):
     cat = node.getCategory()
+    internal_id = None
+    socket_index = 0
 
     if cat == "image" or cat == "tiledimage":
-        socket_index = 0
         texture_type = 1
         if node.getType() == "float":
             socket_index = 1
@@ -101,28 +125,30 @@ def add_node(node):
             texture_type = 0
         fixed_path = os.path.join(os.path.dirname(sys.argv[1]), node.getInput("file").getValue())
         relpath = os.path.relpath(fixed_path)
-        return (add_sub_resource(type="VisualShaderNodeTexture", texture_type = texture_type, texture = add_ext_res(relpath), expanded_output_ports = [0]), socket_index)
+        internal_id = add_sub_resource(type="Texture", texture_type = texture_type, texture = add_ext_res(relpath), expanded_output_ports = [0])
     elif cat == "mix":
         op_type = None
         if node.getType() == "color3" or node.getType() == "color4":
             op_type = 3
         else:
             assert False, node.getType()
-        return (add_sub_resource(type = "VisualShaderNodeMix", op_type=op_type), 0)
+
+        assert_node_has_no_value_sockets(node)
+        internal_id = add_sub_resource(type = "Mix", op_type=op_type)
     elif cat == "texcoord":
         coord = "uv"
         if node.getName() == "UV_Map_001":
             coord = "uv2"
-        return (add_sub_resource(type="VisualShaderNodeInput", input_name = coord), 0)
+        internal_id = add_sub_resource(type="Input", input_name = coord)
     elif cat == "geompropvalue":
         name = node.getInput("geomprop").getValue()
         if name == "UVMap":
-            return (add_sub_resource(type="VisualShaderNodeInput", input_name = "uv"), 0)
+            internal_id = add_sub_resource(type="Input", input_name = "uv")
         else:
             assert False, name
     elif cat == "extract":
         input_type = node.getInput("in").getType()
-        field = node.getInput("index").getValue()
+        socket_index = node.getInput("index").getValue()
 
         op_type = None
 
@@ -131,39 +157,42 @@ def add_node(node):
         else:
             assert False, input_type
 
-        return (add_sub_resource(type = "VisualShaderNodeVectorDecompose", op_type=op_type), field)
+        internal_id = add_sub_resource(type = "VectorDecompose", op_type=op_type)
     elif cat == "clamp":
-        return (add_sub_resource(type = "VisualShaderNodeClamp"), 0)
+        assert node.getType() == "float"
+
+        values = default_input_values(node)
+
+        internal_id = add_sub_resource(type = "Clamp", default_input_values=values)
     elif cat == "position":
-        return (add_sub_resource(type="VisualShaderNodeInput", input_name = "node_position_world"), 0)
+        internal_id = add_sub_resource(type="Input", input_name = "node_position_world")
     elif cat in op_name_to_id:
+        assert_node_has_no_value_sockets(node)
         operator = op_name_to_id[cat]
 
         if node.getType() == "float":
-            return (add_sub_resource(type = "VisualShaderNodeFloatOp", operator = operator), 0)
+            internal_id = add_sub_resource(type = "FloatOp", operator = operator)
         elif node.getType() == "vector3":
-            return (add_sub_resource(type = "VisualShaderNodeVectorOp", operator = operator), 0)
+            internal_id = add_sub_resource(type = "VectorOp", operator = operator)
         else:
             assert False, node.getType()
     elif cat == "dotproduct":
         assert node.getInput("in1").getType() == "vector3"
 
-        default_input_values = [0, godot_parser.Vector3(0,0,0), 1, godot_parser.Vector3(0,0,0)]
-        for (i, input) in enumerate(node.getInputs()):
-            if input.getValue() is not None:
-                default_input_values[i*2] = godot_parser.Vector3(*input.getValue())
-        return (add_sub_resource(type="VisualShaderNodeDotProduct", default_input_values=default_input_values), 0)
+        values = default_input_values(node)
+        internal_id = add_sub_resource(type="DotProduct", default_input_values=values)
     elif cat in func_name_to_id:
+        assert_node_has_no_value_sockets(node)
         operator = func_name_to_id[cat]
 
         if node.getType() == "float":
-            return (add_sub_resource(type = "VisualShaderNodeFloatFunc", operator = operator), 0)
+            internal_id = add_sub_resource(type = "FloatFunc", operator = operator)
         else:
             assert False, node.getType()
     else:
         assert False, cat
-        print(node)
-        return (None, None)
+
+    return (internal_id, socket_index)
 
 seen_edges = set()
 
@@ -201,7 +230,7 @@ for material in doc.getMaterialNodes():
                 if input.getValue() == None:
                     continue
 
-                socket_index = node_and_input_name_to_socket_index[upstream.getCategory()][input.getName()]
+                socket_index = node_and_input_name_to_socket_index["standard_surface"][input.getName()]
 
                 # Ignore MaterialX params we can't handle.
                 if socket_index == None:
@@ -211,9 +240,9 @@ for material in doc.getMaterialNodes():
                 value = input.getValue()
 
                 if input.getType() == "float":
-                    type = "VisualShaderNodeFloatParameter"
+                    type = "FloatParameter"
                 elif input.getType() == "color3":
-                    type = "VisualShaderNodeVec3Parameter"
+                    type = "Vec3Parameter"
                     value = godot_parser.Vector3(*value)
 
                 param_internal_id = add_sub_resource(type=type, parameter_name = input.getName(), default_value_enabled=True, default_value=value)
