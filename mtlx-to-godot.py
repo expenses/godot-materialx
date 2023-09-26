@@ -3,22 +3,28 @@ import sys
 import godot_parser
 import os
 
-op_name_to_id = {
+OP_NAME_TO_ID = {
     "add": 0,
     "subtract": 1,
     "multiply": 2
 }
 
-func_name_to_id = {
+FUNC_NAME_TO_ID = {
     "sin": 0,
     "power": 5
 }
 
-color_func_name_to_id = {
+COLOR_FUNC_NAME_TO_ID = {
     "hsvtorgb": 1
 }
 
-node_and_input_name_to_socket_index = {
+TEXTURE_TYPE_TO_ID = {
+    "data": 0,
+    "color": 1,
+    "normalmap": 2
+}
+
+NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
     "mix": {
         "bg": 0,
         "fg": 1,
@@ -93,23 +99,31 @@ node_and_input_name_to_socket_index = {
         "in1": 0,
         "in2": 1,
         "in3": 2
-    }
+    },
+    "power": {
+        "in1": 0,
+        "in2": 1
+    },
+    "dotproduct": {
+        "in1": 0,
+        "in2": 1
+    },
+    "add": {
+        "in1": 0,
+        "in2": 1
+    },
+    "subtract": {
+        "in1": 0,
+        "in2": 1
+    },
 }
-
-# lazily add in nodes that have two standard inputs
-for two_input_node in ["power", "dotproduct", "add", "multiply", "subtract"]:
-    node_and_input_name_to_socket_index[two_input_node] = {
-    "in1": 0,
-    "in2": 1
-}
-
-skip_nodes = set(["convert", "normalmap"])
 
 def assert_node_has_no_value_sockets(node):
     for input in node.getInputs():
         assert input.getValue() == None, (str(node), [str(i) for i in node.getInputs()])
 
-# Todo: this do any kind of mapping between MaterialX input layouts and godot input layouts yet.
+# Todo: this does not do any kind of mapping between MaterialX input layouts
+# and godot input layouts yet.
 def default_input_values(node):
     values = []
 
@@ -130,167 +144,162 @@ def convert_filename_to_rel_path(node, materialx_filepath, filename):
     # Sometimes you see stuff like '<nodegraph name="NG_wood1" fileprefix="../textures/">'
     # We need to join the filename with that prefix.
     path_with_prefix = os.path.join(node.getActiveFilePrefix(), filename)
-    valid_path = os.path.join(os.dirname(materialx_filepath), path_with_prefix)
+    valid_path = os.path.join(os.path.dirname(materialx_filepath), path_with_prefix)
     return os.path.relpath(valid_path)
 
-
-next_internal_id = None
-
-def convert_material(material):
-    # Todo: Don't use globals!
-    global next_internal_id
-    seen_edges = set()
-
-    got_standard_surface = False
-
+# I'm not a fan of OOP so we're not implementing any functions on this context type,
+# just passing them in as the first argument to stuff.
+class MaterialContext:
     resource = godot_parser.GDResource()
-
+    # The internal id godot uses for specifying nodes and their connections.
+    # Seems to start at 2 but I haven't checked why.
     next_internal_id = 2
     internal_id_to_sub_resource = {}
-    connections = []
     path_to_ext_res = {}
 
-    node_name_to_internal_id_and_output_socket_index = {}
+def add_sub_resource(context, type, **kwargs):
+    assert not type.startswith("VisualShaderNode"), ("we're shortening names for brevity.", type)
 
-    # Add the node as a subresource and return it's internal id.
-    # Todo: make sure we can use this to insert extra nodes such as for converting normals to world space.
-    def add_node(node, connects_to_normalmap):
-        cat = node.getCategory()
-        internal_id = None
-        socket_index = 0
+    sub_res = context.resource.add_sub_resource(type="VisualShaderNode"+type, **kwargs)
+    internal_id = context.next_internal_id
+    context.internal_id_to_sub_resource[internal_id] = godot_parser.SubResource(sub_res.id)
+    context.next_internal_id += 1
+    return internal_id
 
-        if cat == "image" or cat == "tiledimage":
-            texture_type = 1
-            if connects_to_normalmap:
-                texture_type = 2
-            elif node.getType() == "float":
-                socket_index = 1
-                # color images use color3 etc.
-                texture_type = 0
-            relpath = convert_filename_to_rel_path(node, sys.argv[1], node.getInput("file").getValue())
-            internal_id = add_sub_resource(type="Texture", texture_type = texture_type, texture = add_ext_res(relpath), expanded_output_ports = [0])
-        elif cat == "mix":
-            op_type = None
-            if node.getType() == "color3" or node.getType() == "color4":
-                op_type = 3
-            else:
-                assert False, node.getType()
+def add_ext_res(context, path, type="Texture2D"):
+    path = "res://" + path
+    if not path in context.path_to_ext_res:
+        context.path_to_ext_res[path] = godot_parser.ExtResource(context.resource.add_ext_resource(path, type).id)
+    return context.path_to_ext_res[path]
 
-            assert_node_has_no_value_sockets(node)
-            internal_id = add_sub_resource(type = "Mix", op_type=op_type)
-        elif cat == "texcoord":
-            coord = "uv"
-            if node.getName() == "UV_Map_001":
-                coord = "uv2"
-            internal_id = add_sub_resource(type="Input", input_name = coord)
-        elif cat == "geompropvalue":
-            name = node.getInput("geomprop").getValue()
-            if name == "UVMap":
-                internal_id = add_sub_resource(type="Input", input_name = "uv")
-            else:
-                assert False, name
-        elif cat == "extract":
-            input_type = node.getInput("in").getType()
-            socket_index = node.getInput("index").getValue()
+# Add the node as a subresource and return it's internal id.
+# Todo: make sure we can use this to insert extra nodes such as for converting normals to world space.
+# Todo: eliminate op_types as much as possible.
+def add_node(context, node, connects_to_normalmap):
+    cat = node.getCategory()
+    internal_id = None
+    socket_index = 0
 
-            op_type = None
-
-            if input_type == "color4":
-                op_type = 2
-            else:
-                assert False, input_type
-
-            internal_id = add_sub_resource(type = "VectorDecompose", op_type=op_type)
-        elif cat == "clamp":
-            op_type = None
-
-            if node.getType() == "float":
-                op_type = 0
-            elif node.getType() == "color3":
-                op_type = 4
-            else:
-                assert False, node
-
-            values = default_input_values(node)
-
-            internal_id = add_sub_resource(type = "Clamp", default_input_values=values, op_type=op_type)
-        elif cat == "position":
-            internal_id = add_sub_resource(type="Input", input_name = "node_position_world")
-        elif cat == "combine3":
-            values = default_input_values(node)
-            internal_id = add_sub_resource(type="VectorCompose", default_input_values=values)
-        elif cat == "dotproduct":
-            assert node.getInput("in1").getType() == "vector3"
-
-            values = default_input_values(node)
-            internal_id = add_sub_resource(type="DotProduct", default_input_values=values)
-        elif cat in op_name_to_id:
-            values = default_input_values(node)
-            operator = op_name_to_id[cat]
-
-            if node.getType() == "float":
-                internal_id = add_sub_resource(type = "FloatOp", operator = operator, default_input_values=values)
-            elif node.getType() == "vector3" or node.getType() == "color3":
-                internal_id = add_sub_resource(type = "VectorOp", operator = operator, default_input_values=values)
-            else:
-                assert False, node.getType()
-
-        elif cat in func_name_to_id:
-            assert_node_has_no_value_sockets(node)
-            operator = func_name_to_id[cat]
-
-            if node.getType() == "float":
-                internal_id = add_sub_resource(type = "FloatFunc", operator = operator)
-            else:
-                assert False, node.getType()
-        elif cat in color_func_name_to_id:
-            operator = color_func_name_to_id[cat]
-            internal_id = add_sub_resource(type = "ColorFunc", operator = operator)
+    if cat == "image" or cat == "tiledimage":
+        texture_type = "color"
+        if connects_to_normalmap:
+            texture_type = "normalmap"
+        elif node.getType() == "float":
+            socket_index = 1
+            # color images use color3 etc.
+            texture_type = "data"
+        relpath = convert_filename_to_rel_path(node, sys.argv[1], node.getInput("file").getValue())
+        internal_id = add_sub_resource(context, type="Texture", texture_type = TEXTURE_TYPE_TO_ID[texture_type], texture = add_ext_res(context, relpath), expanded_output_ports = [0])
+    elif cat == "mix":
+        op_type = None
+        if node.getType() == "color3" or node.getType() == "color4":
+            op_type = 3
         else:
-            assert False, cat
+            assert False, node.getType()
 
-        return (internal_id, socket_index)
+        assert_node_has_no_value_sockets(node)
+        internal_id = add_sub_resource(context, type = "Mix", op_type=op_type)
+    elif cat == "texcoord":
+        coord = "uv"
+        if node.getName() == "UV_Map_001":
+            coord = "uv2"
+        internal_id = add_sub_resource(context, type="Input", input_name = coord)
+    elif cat == "geompropvalue":
+        name = node.getInput("geomprop").getValue()
+        if name == "UVMap":
+            internal_id = add_sub_resource(context, type="Input", input_name = "uv")
+        else:
+            assert False, name
+    elif cat == "extract":
+        input_type = node.getInput("in").getType()
+        socket_index = node.getInput("index").getValue()
 
-    def add_sub_resource(type, **kwargs):
-        # Todo: Don't use globals! Find a good way to pass a context class
-        # via add_node.
-        global next_internal_id
+        op_type = None
 
-        assert not type.startswith("VisualShaderNode"), ("we're shortening names for brevity.", type)
+        if input_type == "color4":
+            op_type = 2
+        else:
+            assert False, input_type
 
-        sub_res = resource.add_sub_resource(type="VisualShaderNode"+type, **kwargs)
-        internal_id = next_internal_id
-        internal_id_to_sub_resource[internal_id] = godot_parser.SubResource(sub_res.id)
-        next_internal_id += 1
-        return internal_id
+        internal_id = add_sub_resource(context, type = "VectorDecompose", op_type=op_type)
+    elif cat == "clamp":
+        op_type = None
 
+        if node.getType() == "float":
+            op_type = 0
+        elif node.getType() == "color3":
+            op_type = 4
+        else:
+            assert False, node
 
-    def add_ext_res(path, type="Texture2D"):
-        # Todo: Don't use globals! Find a good way to pass a context class
-        # via add_node.
-        path = "res://" + path
-        if not path in path_to_ext_res:
-            path_to_ext_res[path] = godot_parser.ExtResource(resource.add_ext_resource(path, type).id)
-        return path_to_ext_res[path]
+        values = default_input_values(node)
 
+        internal_id = add_sub_resource(context, type = "Clamp", default_input_values=values, op_type=op_type)
+    elif cat == "position":
+        internal_id = add_sub_resource(context, type="Input", input_name = "node_position_world")
+    elif cat == "combine3":
+        values = default_input_values(node)
+        internal_id = add_sub_resource(context, type="VectorCompose", default_input_values=values)
+    elif cat == "dotproduct":
+        assert node.getInput("in1").getType() == "vector3"
+
+        values = default_input_values(node)
+        internal_id = add_sub_resource(context, type="DotProduct", default_input_values=values)
+    elif cat in OP_NAME_TO_ID:
+        values = default_input_values(node)
+        operator = OP_NAME_TO_ID[cat]
+
+        if node.getType() == "float":
+            internal_id = add_sub_resource(context, type = "FloatOp", operator = operator, default_input_values=values)
+        elif node.getType() == "vector3" or node.getType() == "color3":
+            internal_id = add_sub_resource(context, type = "VectorOp", operator = operator, default_input_values=values)
+        else:
+            assert False, node.getType()
+
+    elif cat in func_name_to_id:
+        assert_node_has_no_value_sockets(node)
+        operator = func_name_to_id[cat]
+
+        if node.getType() == "float":
+            internal_id = add_sub_resource(context, type = "FloatFunc", operator = operator)
+        else:
+            assert False, node.getType()
+    elif cat in COLOR_FUNC_NAME_TO_ID:
+        operator = COLOR_FUNC_NAME_TO_ID[cat]
+        internal_id = add_sub_resource(context, type = "ColorFunc", operator = operator)
+    else:
+        assert False, cat
+
+    return (internal_id, socket_index)
+
+def convert_material(material):
+    seen_edges = set()
+    got_standard_surface = False
+    node_name_to_internal_id_and_output_socket_index = {}
+    connections = []
+    # Todo: maybe put this other stuff in context too even though it's not needed in add_node
+    # or the other functions?
+    context = MaterialContext()
 
     for edge in material.traverseGraph():
         upstream = edge.getUpstreamElement()
         downstream = edge.getDownstreamElement()
         input_socket = edge.getConnectingElement()
 
-        # Todo: sometimes edges get emitted twice by some funky files with multiple materials or smth.
+        # Sometimes edges get emitted twice by some funky files with multiple materials or smth.
+        # Todo: check to see if we need to do this.
         edge_id = (input_socket.getName(), downstream.getName())
         if edge_id in seen_edges:
             continue
         seen_edges.add(edge_id)
 
-        connects_to_normalmap = upstream.getCategory() == "normalmap"
-
         # Ignore convert and normalmap nodes
+        connects_to_normalmap = upstream.getCategory() == "normalmap"
+        skip_nodes = {"convert", "normalmap"}
+
         if downstream.getCategory() in skip_nodes:
             continue
-        # If the upsteam node is a convert node then find what it's upstream node is and use that instead.
+        # If the upsteam node is a skipped node then find what it's upstream node is and use that instead.
         elif upstream.getCategory() in skip_nodes:
             assert upstream.getConnectedNode("in") is not None, upstream
             upstream = upstream.getConnectedNode("in")
@@ -308,7 +317,7 @@ def convert_material(material):
                 if input.getValue() == None:
                     continue
 
-                socket_index = node_and_input_name_to_socket_index["standard_surface"][input.getName()]
+                socket_index = NODE_AND_INPUT_NAME_TO_SOCKET_INDEX["standard_surface"][input.getName()]
 
                 # Ignore MaterialX params we can't handle.
                 if socket_index == None:
@@ -323,22 +332,22 @@ def convert_material(material):
                     type = "Vec3Parameter"
                     value = godot_parser.Vector3(*value)
 
-                param_internal_id = add_sub_resource(type=type, parameter_name = input.getName(), default_value_enabled=True, default_value=value)
+                param_internal_id = add_sub_resource(context, type=type, parameter_name = input.getName(), default_value_enabled=True, default_value=value)
 
                 connections += [param_internal_id, 0, 0, socket_index]
             continue
 
         # Get or set the internal id for the upstream node
         if not upstream.getName() in node_name_to_internal_id_and_output_socket_index:
-            node_name_to_internal_id_and_output_socket_index[upstream.getName()] = add_node(upstream, connects_to_normalmap)
+            node_name_to_internal_id_and_output_socket_index[upstream.getName()] = add_node(context, upstream, connects_to_normalmap)
 
         (upstream_internal_id, upstream_socket_index) = node_name_to_internal_id_and_output_socket_index[upstream.getName()]
 
         # Try to get the socket index we're connecting into.
         downstream_socket_index = None
 
-        if downstream.getCategory() in node_and_input_name_to_socket_index:
-            downstream_socket_index = node_and_input_name_to_socket_index[downstream.getCategory()][input_socket.getName()]
+        if downstream.getCategory() in NODE_AND_INPUT_NAME_TO_SOCKET_INDEX:
+            downstream_socket_index = NODE_AND_INPUT_NAME_TO_SOCKET_INDEX[downstream.getCategory()][input_socket.getName()]
         else:
             # Make sure we at least know about the socket.
             assert False, downstream.getCategory()
@@ -351,14 +360,16 @@ def convert_material(material):
         (downstream_internal_id, _) = node_name_to_internal_id_and_output_socket_index[downstream.getName()]
         connections += [upstream_internal_id, upstream_socket_index, downstream_internal_id, downstream_socket_index]
 
+    # Write out the resource section where we give the nodes IDs and define their connections.
     section = godot_parser.GDSection(header=godot_parser.GDSectionHeader('resource'))
-    for internal_id, sub_res in internal_id_to_sub_resource.items():
+    for internal_id, sub_res in context.internal_id_to_sub_resource.items():
         section[f"nodes/fragment/{internal_id}/node"] = sub_res
 
     section["nodes/fragment/connections"] = godot_parser.GDObject("PackedInt32Array", *connections)
-    resource.add_section(section)
+    context.resource.add_section(section)
 
-    resource = str(resource)
+    # Hack because I'm not sure how to set the type in the godot_parser lib
+    resource = str(context.resource)
     resource = resource.replace("[gd_resource", "[gd_resource type=\"VisualShader\"")
 
     return resource
