@@ -116,7 +116,25 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
         "in1": 0,
         "in2": 1
     },
+    "multiply": {
+        "in1": 0,
+        "in2": 1
+    },
 }
+
+def get_value_as_godot_or_default(input):
+    if input.getType() == "float":
+        return input.getValue() or 0.0
+    elif input.getType() == "color3" or input.getType() == "vector3":
+        return input.getValue() and godot_parser.Vector3(*input.getValue()) or godot_parser.Vector3(0,0,0)
+    else:
+        assert False, input
+
+def get_value_as_godot(input):
+    if input.getValue() is None:
+        return None
+
+    return get_value_as_godot_or_default(input)
 
 def assert_node_has_no_value_sockets(node):
     for input in node.getInputs():
@@ -128,15 +146,7 @@ def default_input_values(node):
     values = []
 
     for (i, input) in enumerate(node.getInputs()):
-        value = None
-        if input.getType() == "float":
-            value = input.getValue() or 0.0
-        elif input.getType() == "vector3" or input.getType() == "color3":
-            value = input.getValue() and godot_parser.Vector3(*input.getValue()) or godot_parser.Vector3(0,0,0)
-        else:
-            assert False, input.getType()
-
-        values += [i, value]
+        values += [i, get_value_as_godot_or_default(input)]
     return values
 
 # Paths in MaterialX are confusingly indirect.
@@ -156,6 +166,13 @@ class MaterialContext:
     next_internal_id = 2
     internal_id_to_sub_resource = {}
     path_to_ext_res = {}
+
+    # We need this to reset between materials (not sure why, I don't know python so well)
+    def __init__(self):
+        self.resource = godot_parser.GDResource()
+        self.next_internal_id = 2
+        self.internal_id_to_sub_resource = {}
+        self.path_to_ext_res = {}
 
 def add_sub_resource(context, type, **kwargs):
     assert not type.startswith("VisualShaderNode"), ("we're shortening names for brevity.", type)
@@ -256,9 +273,9 @@ def add_node(context, node, connects_to_normalmap):
         else:
             assert False, node.getType()
 
-    elif cat in func_name_to_id:
+    elif cat in FUNC_NAME_TO_ID:
         assert_node_has_no_value_sockets(node)
-        operator = func_name_to_id[cat]
+        operator = FUNC_NAME_TO_ID[cat]
 
         if node.getType() == "float":
             internal_id = add_sub_resource(context, type = "FloatFunc", operator = operator)
@@ -324,15 +341,19 @@ def convert_material(material):
                     continue
 
                 type = None
-                value = input.getValue()
 
                 if input.getType() == "float":
                     type = "FloatParameter"
                 elif input.getType() == "color3":
                     type = "Vec3Parameter"
-                    value = godot_parser.Vector3(*value)
 
-                param_internal_id = add_sub_resource(context, type=type, parameter_name = input.getName(), default_value_enabled=True, default_value=value)
+                param_internal_id = add_sub_resource(
+                    context,
+                    type=type,
+                    parameter_name = input.getName(),
+                    default_value_enabled=True,
+                    default_value=get_value_as_godot(input)
+                )
 
                 connections += [param_internal_id, 0, 0, socket_index]
             continue
