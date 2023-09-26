@@ -3,6 +3,13 @@ import sys
 import godot_parser
 import os
 
+VECTOR_OP_TYPE = {
+    "vector2": 0,
+    "vector3": 1,
+    "color3": 1,
+    "vector4": 2,
+}
+
 OP_NAME_TO_ID = {
     "add": 0,
     "subtract": 1,
@@ -11,6 +18,7 @@ OP_NAME_TO_ID = {
 
 FUNC_NAME_TO_ID = {
     "sin": 0,
+    "cos": 1,
     "power": 5
 }
 
@@ -41,28 +49,30 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
         "specular_color": None,
         "specular_rotation": None,
         # Todo: multiply these two.
-        "emission": None,
-        "emission_color": 5,
+        "emission": 5,
+        "emission_color": None,
         "normal": 9,
         "coat": 13,
         "coat_roughness": 14,
         "coat_color": None,
         "specular_anisotropy": 15,
+        # Todo: is plugging this into 'subsurf scatter' correct?
+        "subsurface": 17,
         "coat_anisotropy": None,
         "coat_rotation": None,
         "coat_IOR": None,
         "coat_affect_color": None,
         "coat_affect_roughness": None,
+        "coat_normal": None,
         "specular_IOR": None,
         "sheen": None,
         "sheen_color": None,
         "sheen_roughness": None,
-        "subsurface": None,
+        # Todo: which of these can we handle?
         "subsurface_scale": None,
         "subsurface_color": None,
         "subsurface_radius": None,
         "subsurface_anisotropy": None,
-        # Todo: use this for alpha?
         "transmission": None,
         "transmission_color": None,
         "transmission_depth": None,
@@ -74,7 +84,8 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
         "thin_walled_thickness": None,
         "thin_film_thickness": None,
         "thin_film_IOR": None,
-        # Todo: use this for alpha?
+        "tangent": None,
+        # Todo: use this for alpha? It's a color3 for some reason.
         "opacity": None
     },
     "clamp": {
@@ -92,8 +103,15 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
     "sin": {
         "in": 0
     },
+    "cos": {
+        "in": 0
+    },
     "hsvtorgb": {
         "in": 0
+    },
+    "combine2": {
+        "in1": 0,
+        "in2": 1
     },
     "combine3": {
         "in1": 0,
@@ -105,6 +123,10 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
         "in2": 1
     },
     "dotproduct": {
+        "in1": 0,
+        "in2": 1
+    },
+    "dot": {
         "in1": 0,
         "in2": 1
     },
@@ -125,6 +147,8 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
 def get_value_as_godot_or_default(input):
     if input.getType() == "float":
         return input.getValue() or 0.0
+    elif input.getType() == "vector2":
+        return input.getValue() and godot_parser.Vector2(*input.getValue()) or godot_parser.Vector2(0,0)
     elif input.getType() == "color3" or input.getType() == "vector3":
         return input.getValue() and godot_parser.Vector3(*input.getValue()) or godot_parser.Vector3(0,0,0)
     else:
@@ -209,13 +233,15 @@ def add_node(context, node, connects_to_normalmap):
         internal_id = add_sub_resource(context, type="Texture", texture_type = TEXTURE_TYPE_TO_ID[texture_type], texture = add_ext_res(context, relpath), expanded_output_ports = [0])
     elif cat == "mix":
         op_type = None
-        if node.getType() == "color3" or node.getType() == "color4":
+        if node.getType() == "float":
+            op_type = 0
+        elif node.getType() == "vector3" or node.getType() == "color3" or node.getType() == "color4":
             op_type = 3
         else:
             assert False, node.getType()
 
-        assert_node_has_no_value_sockets(node)
-        internal_id = add_sub_resource(context, type = "Mix", op_type=op_type)
+        values = default_input_values(node)
+        internal_id = add_sub_resource(context, type = "Mix", op_type=op_type, default_input_values=values)
     elif cat == "texcoord":
         coord = "uv"
         if node.getName() == "UV_Map_001":
@@ -231,14 +257,7 @@ def add_node(context, node, connects_to_normalmap):
         input_type = node.getInput("in").getType()
         socket_index = node.getInput("index").getValue()
 
-        op_type = None
-
-        if input_type == "color4":
-            op_type = 2
-        else:
-            assert False, input_type
-
-        internal_id = add_sub_resource(context, type = "VectorDecompose", op_type=op_type)
+        internal_id = add_sub_resource(context, type = "VectorDecompose", op_type=VECTOR_OP_TYPE[input_type])
     elif cat == "clamp":
         op_type = None
 
@@ -254,25 +273,51 @@ def add_node(context, node, connects_to_normalmap):
         internal_id = add_sub_resource(context, type = "Clamp", default_input_values=values, op_type=op_type)
     elif cat == "position":
         internal_id = add_sub_resource(context, type="Input", input_name = "node_position_world")
-    elif cat == "combine3":
+    elif cat == "combine3" or cat == "combine2":
         values = default_input_values(node)
-        internal_id = add_sub_resource(context, type="VectorCompose", default_input_values=values)
+        internal_id = add_sub_resource(context, type="VectorCompose", default_input_values=values, op_type=VECTOR_OP_TYPE[node.getType()])
     elif cat == "dotproduct":
         assert node.getInput("in1").getType() == "vector3"
 
         values = default_input_values(node)
         internal_id = add_sub_resource(context, type="DotProduct", default_input_values=values)
+    elif cat == "constant":
+        input = node.getInput("value")
+        type = None
+
+        if input.getType() == "float":
+            type = "FloatParameter"
+        elif input.getType() == "vector2":
+            type = "Vec2Parameter"
+        elif input.getType() == "color3":
+            type = "Vec3Parameter"
+        else:
+            assert False, input.getType()
+
+        internal_id = add_sub_resource(
+            context,
+            type=type,
+            parameter_name = input.getName(),
+            default_value_enabled=True,
+            default_value=get_value_as_godot(input)
+        )
+    elif cat == "normal":
+        # todo: world space normals.
+        #print(node.getInput("space"))
+        internal_id = add_sub_resource(context, type="Input", input_name = "normal")
+    elif cat == "tangent":
+        # todo: world space tangents.
+        #print(node.getInput("space"))
+        internal_id = add_sub_resource(context, type="Input", input_name = "tangent")
     elif cat in OP_NAME_TO_ID:
         values = default_input_values(node)
         operator = OP_NAME_TO_ID[cat]
 
         if node.getType() == "float":
             internal_id = add_sub_resource(context, type = "FloatOp", operator = operator, default_input_values=values)
-        elif node.getType() == "vector3" or node.getType() == "color3":
-            internal_id = add_sub_resource(context, type = "VectorOp", operator = operator, default_input_values=values)
         else:
-            assert False, node.getType()
-
+            op_type = VECTOR_OP_TYPE[node.getType()]
+            internal_id = add_sub_resource(context, type = "VectorOp", operator = operator, default_input_values=values)
     elif cat in FUNC_NAME_TO_ID:
         assert_node_has_no_value_sockets(node)
         operator = FUNC_NAME_TO_ID[cat]
@@ -303,16 +348,20 @@ def convert_material(material):
         downstream = edge.getDownstreamElement()
         input_socket = edge.getConnectingElement()
 
-        # Sometimes edges get emitted twice by some funky files with multiple materials or smth.
-        # Todo: check to see if we need to do this.
+        # Sometimes edges get emitted twice by some funky files where the same
+        # nodegraph output is used twice.
+        # Example: https://github.com/RogerDass/Usd-Mtlx-Example/blob/2829831c2deab4f74ff805965462b99835c064c7/materials/standard_surface_brass_tiled.mtlx
         edge_id = (input_socket.getName(), downstream.getName())
         if edge_id in seen_edges:
             continue
         seen_edges.add(edge_id)
 
-        # Ignore convert and normalmap nodes
+        # Ignore a few node types (making note of normalmaps)
+        # - conversions are implicit in godot
+        # - there are no normalmap nodes, that happens in the Texture2D node
+        # - dots are just no-ops for pretty graphs or something, like a blender reroute
         connects_to_normalmap = upstream.getCategory() == "normalmap"
-        skip_nodes = {"convert", "normalmap"}
+        skip_nodes = {"convert", "normalmap", "dot"}
 
         if downstream.getCategory() in skip_nodes:
             continue
@@ -368,7 +417,9 @@ def convert_material(material):
         downstream_socket_index = None
 
         if downstream.getCategory() in NODE_AND_INPUT_NAME_TO_SOCKET_INDEX:
-            downstream_socket_index = NODE_AND_INPUT_NAME_TO_SOCKET_INDEX[downstream.getCategory()][input_socket.getName()]
+            downstream_sockets = NODE_AND_INPUT_NAME_TO_SOCKET_INDEX[downstream.getCategory()]
+            assert input_socket.getName() in downstream_sockets, (str(input_socket), str(downstream))
+            downstream_socket_index = downstream_sockets[input_socket.getName()]
         else:
             # Make sure we at least know about the socket.
             assert False, downstream.getCategory()
