@@ -151,6 +151,13 @@ NODE_AND_INPUT_NAME_TO_SOCKET_INDEX = {
         "in1": 0,
         "in2": 1
     },
+    "remap": {
+        "in": 0,
+        "inlow": 1,
+        "inhigh": 2,
+        "outlow": 3,
+        "outhigh": 4,
+    }
 }
 
 def get_value_as_godot_or_default(input):
@@ -179,6 +186,9 @@ def default_input_values(node):
     values = []
 
     for (i, input) in enumerate(node.getInputs()):
+        # Todo: perhaps handle interface inputs a different way?
+        if input.getInterfaceInput() is not None:
+            input = input.getInterfaceInput()
         values += [i, get_value_as_godot_or_default(input)]
     return values
 
@@ -286,7 +296,7 @@ class MaterialContext:
 
             internal_id = self.add_sub_resource(
                 node_type=node_type,
-                parameter_name = input.getName(),
+                parameter_name = node.getName(),
                 default_value_enabled=True,
                 default_value=get_value_as_godot(input)
             )
@@ -298,6 +308,9 @@ class MaterialContext:
             # todo: world space tangents.
             #print(node.getInput("space"))
             internal_id = self.add_sub_resource(node_type="Input", input_name = "tangent")
+        elif cat == "remap":
+            values = default_input_values(node)
+            internal_id = self.add_sub_resource(node_type="Remap", default_input_values=values)
         elif cat in OP_NAME_TO_ID:
             values = default_input_values(node)
             operator = OP_NAME_TO_ID[cat]
